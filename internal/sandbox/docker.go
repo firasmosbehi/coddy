@@ -4,20 +4,21 @@ package sandbox
 import (
 	"context"
 	"fmt"
-	"io"
 
 	"github.com/firasmosbehi/coddy/pkg/models"
 )
 
-// DockerSandbox is a placeholder for Docker-based sandbox.
-// Full implementation will be added in Phase 2.
+// DockerSandbox runs code in isolated Docker containers.
+// NOTE: This is a stub implementation. Full implementation requires
+// Docker SDK dependencies which have complex version requirements.
+// For production use, implement using github.com/docker/docker/client.
 type DockerSandbox struct {
 	config *Config
 }
 
 // NewDockerSandbox creates a new Docker-based sandbox.
 func NewDockerSandbox(cfg *Config) (*DockerSandbox, error) {
-	return nil, fmt.Errorf("docker sandbox not yet implemented")
+	return nil, fmt.Errorf("docker sandbox not yet fully implemented. Use SANDBOX_TYPE=subprocess for development")
 }
 
 // Execute runs code in a Docker container.
@@ -47,10 +48,5 @@ func (s *DockerSandbox) Reset(ctx context.Context) error {
 
 // Close stops and removes the container.
 func (s *DockerSandbox) Close() error {
-	return fmt.Errorf("not implemented")
-}
-
-// CopyToContainer copies data to a path in the container.
-func CopyToContainer(ctx context.Context, client interface{}, containerID, path string, content io.Reader) error {
-	return fmt.Errorf("not implemented")
+	return nil
 }

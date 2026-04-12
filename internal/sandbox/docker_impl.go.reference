@@ -1,0 +1,381 @@
+// +build ignore
+
+// This is a reference implementation of the Docker sandbox.
+// It requires Docker SDK dependencies to be properly set up.
+// To use:
+//   1. Add Docker SDK: go get github.com/docker/docker@latest
+//   2. Rename this file to docker_impl.go
+//   3. Update docker.go to remove the stub implementation
+
+package sandbox
+
+import (
+	"archive/tar"
+	"bytes"
+	"context"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/image"
+	"github.com/docker/docker/api/types/mount"
+	"github.com/docker/docker/api/types/volume"
+	"github.com/docker/docker/client"
+	"github.com/docker/docker/pkg/stdcopy"
+	"github.com/firasmosbehi/coddy/pkg/models"
+)
+
+// DockerSandbox runs code in isolated Docker containers.
+type DockerSandbox struct {
+	config      *Config
+	client      *client.Client
+	containerID string
+	volumeName  string
+}
+
+// NewDockerSandbox creates a new Docker-based sandbox.
+func NewDockerSandbox(cfg *Config) (*DockerSandbox, error) {
+	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
+	if err != nil {
+		return nil, fmt.Errorf("failed to create Docker client: %w", err)
+	}
+
+	s := &DockerSandbox{
+		config:     cfg,
+		client:     cli,
+		volumeName: fmt.Sprintf("coddy-sandbox-%d", time.Now().UnixNano()),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	// Ensure image exists
+	if err := s.ensureImage(ctx); err != nil {
+		return nil, fmt.Errorf("failed to ensure image: %w", err)
+	}
+
+	// Create volume for persistence
+	if err := s.createVolume(ctx); err != nil {
+		return nil, fmt.Errorf("failed to create volume: %w", err)
+	}
+
+	// Create the container
+	if err := s.createContainer(ctx); err != nil {
+		return nil, fmt.Errorf("failed to create container: %w", err)
+	}
+
+	return s, nil
+}
+
+func (s *DockerSandbox) ensureImage(ctx context.Context) error {
+	images, err := s.client.ImageList(ctx, image.ListOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to list images: %w", err)
+	}
+
+	for _, img := range images {
+		for _, tag := range img.RepoTags {
+			if tag == s.config.Image {
+				return nil
+			}
+		}
+	}
+
+	fmt.Printf("Pulling Docker image %s...\n", s.config.Image)
+	reader, err := s.client.ImagePull(ctx, s.config.Image, image.PullOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to pull image: %w", err)
+	}
+	defer reader.Close()
+
+	io.Copy(io.Discard, reader)
+	return nil
+}
+
+func (s *DockerSandbox) createVolume(ctx context.Context) error {
+	_, err := s.client.VolumeCreate(ctx, volume.CreateOptions{
+		Name:   s.volumeName,
+		Driver: "local",
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create volume: %w", err)
+	}
+	return nil
+}
+
+func (s *DockerSandbox) createContainer(ctx context.Context) error {
+	resources := container.Resources{
+		Memory:   parseMemory(s.config.MemoryLimit),
+		NanoCPUs: int64(s.config.CPULimit * 1e9),
+	}
+
+	config := &container.Config{
+		Image:      s.config.Image,
+		Cmd:        []string{"tail", "-f", "/dev/null"},
+		User:       "coddy",
+		WorkingDir: "/home/coddy/workspace",
+		Labels: map[string]string{
+			"coddy.sandbox": "true",
+		},
+	}
+
+	hostConfig := &container.HostConfig{
+		Resources:      resources,
+		NetworkMode:    container.NetworkMode(s.config.Network),
+		AutoRemove:     false,
+		ReadonlyRootfs: true,
+		Tmpfs: map[string]string{
+			"/tmp": "rw,noexec,nosuid,size=100m",
+		},
+		Mounts: []mount.Mount{
+			{
+				Type:   mount.TypeVolume,
+				Source: s.volumeName,
+				Target: "/home/coddy/workspace",
+			},
+		},
+	}
+
+	resp, err := s.client.ContainerCreate(ctx, config, hostConfig, nil, nil, "")
+	if err != nil {
+		return fmt.Errorf("failed to create container: %w", err)
+	}
+
+	s.containerID = resp.ID
+
+	if err := s.client.ContainerStart(ctx, s.containerID, container.StartOptions{}); err != nil {
+		return fmt.Errorf("failed to start container: %w", err)
+	}
+
+	return nil
+}
+
+func (s *DockerSandbox) Execute(ctx context.Context, code string, language models.Language) (models.ExecutionResult, error) {
+	result := models.ExecutionResult{ExitCode: -1}
+
+	if !language.IsValid() {
+		return result, fmt.Errorf("unsupported language: %s", language)
+	}
+
+	filesBefore, _ := s.listFilesInContainer(ctx, "/home/coddy/workspace")
+
+	var cmd []string
+	switch language {
+	case models.Python:
+		cmd = []string{"python3", "-c", code}
+	case models.NodeJS:
+		cmd = []string{"node", "-e", code}
+	}
+
+	execConfig := types.ExecConfig{
+		Cmd:          cmd,
+		AttachStdout: true,
+		AttachStderr: true,
+		WorkingDir:   "/home/coddy/workspace",
+		User:         "coddy",
+	}
+
+	start := time.Now()
+
+	execResp, err := s.client.ContainerExecCreate(ctx, s.containerID, execConfig)
+	if err != nil {
+		return result, fmt.Errorf("failed to create exec: %w", err)
+	}
+
+	attachResp, err := s.client.ContainerExecAttach(ctx, execResp.ID, types.ExecStartCheck{})
+	if err != nil {
+		return result, fmt.Errorf("failed to attach to exec: %w", err)
+	}
+	defer attachResp.Close()
+
+	var stdoutBuf, stderrBuf bytes.Buffer
+	done := make(chan error, 1)
+
+	go func() {
+		_, err := stdcopy.StdCopy(&stdoutBuf, &stderrBuf, attachResp.Reader)
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			return result, fmt.Errorf("error reading output: %w", err)
+		}
+	case <-ctx.Done():
+		result.TimedOut = true
+		result.ExecutionTimeMs = time.Since(start).Milliseconds()
+		return result, nil
+	}
+
+	result.ExecutionTimeMs = time.Since(start).Milliseconds()
+	result.Stdout = stdoutBuf.String()
+	result.Stderr = stderrBuf.String()
+
+	inspectResp, err := s.client.ContainerExecInspect(ctx, execResp.ID)
+	if err != nil {
+		return result, fmt.Errorf("failed to inspect exec: %w", err)
+	}
+
+	result.ExitCode = inspectResp.ExitCode
+
+	filesAfter, _ := s.listFilesInContainer(ctx, "/home/coddy/workspace")
+	result.OutputFiles = diffStringSlices(filesBefore, filesAfter)
+
+	return result, nil
+}
+
+func (s *DockerSandbox) UploadFile(ctx context.Context, localPath, sandboxPath string) error {
+	data, err := os.ReadFile(localPath)
+	if err != nil {
+		return fmt.Errorf("failed to read local file: %w", err)
+	}
+
+	sandboxPath = filepath.Clean(sandboxPath)
+	if strings.HasPrefix(sandboxPath, "/") {
+		sandboxPath = strings.TrimPrefix(sandboxPath, "/home/coddy/workspace/")
+		sandboxPath = strings.TrimPrefix(sandboxPath, "/")
+	}
+
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+
+	hdr := &tar.Header{
+		Name: sandboxPath,
+		Mode: 0644,
+		Size: int64(len(data)),
+	}
+	tw.WriteHeader(hdr)
+	tw.Write(data)
+	tw.Close()
+
+	return s.client.CopyToContainer(ctx, s.containerID, "/home/coddy/workspace/", &buf, types.CopyToContainerOptions{})
+}
+
+func (s *DockerSandbox) DownloadFile(ctx context.Context, sandboxPath string) ([]byte, error) {
+	sandboxPath = filepath.Clean(sandboxPath)
+	if !strings.HasPrefix(sandboxPath, "/") {
+		sandboxPath = filepath.Join("/home/coddy/workspace", sandboxPath)
+	}
+
+	reader, _, err := s.client.CopyFromContainer(ctx, s.containerID, sandboxPath)
+	if err != nil {
+		return nil, err
+	}
+	defer reader.Close()
+
+	tr := tar.NewReader(reader)
+	tr.Next()
+	return io.ReadAll(tr)
+}
+
+func (s *DockerSandbox) ListFiles(ctx context.Context, path string) ([]string, error) {
+	if path == "" {
+		path = "/home/coddy/workspace"
+	}
+	return s.listFilesInContainer(ctx, path)
+}
+
+func (s *DockerSandbox) listFilesInContainer(ctx context.Context, path string) ([]string, error) {
+	execConfig := types.ExecConfig{
+		Cmd:          []string{"find", path, "-type", "f"},
+		AttachStdout: true,
+	}
+
+	execResp, err := s.client.ContainerExecCreate(ctx, s.containerID, execConfig)
+	if err != nil {
+		return nil, err
+	}
+
+	attachResp, err := s.client.ContainerExecAttach(ctx, execResp.ID, types.ExecStartCheck{})
+	if err != nil {
+		return nil, err
+	}
+	defer attachResp.Close()
+
+	var stdout bytes.Buffer
+	stdout.ReadFrom(attachResp.Reader)
+
+	lines := strings.Split(stdout.String(), "\n")
+	var files []string
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line != "" && line != path {
+			rel := strings.TrimPrefix(line, "/home/coddy/workspace/")
+			files = append(files, rel)
+		}
+	}
+
+	return files, nil
+}
+
+func (s *DockerSandbox) Reset(ctx context.Context) error {
+	execConfig := types.ExecConfig{
+		Cmd: []string{"sh", "-c", "rm -rf /home/coddy/workspace/*"},
+	}
+
+	execResp, err := s.client.ContainerExecCreate(ctx, s.containerID, execConfig)
+	if err != nil {
+		return err
+	}
+
+	return s.client.ContainerExecStart(ctx, execResp.ID, types.ExecStartCheck{})
+}
+
+func (s *DockerSandbox) Close() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if s.containerID != "" {
+		timeout := 10
+		s.client.ContainerStop(ctx, s.containerID, container.StopOptions{Timeout: &timeout})
+		s.client.ContainerRemove(ctx, s.containerID, container.RemoveOptions{Force: true})
+	}
+
+	if s.volumeName != "" {
+		s.client.VolumeRemove(ctx, s.volumeName, true)
+	}
+
+	if s.client != nil {
+		s.client.Close()
+	}
+
+	return nil
+}
+
+func parseMemory(limit string) int64 {
+	limit = strings.ToLower(strings.TrimSpace(limit))
+	multiplier := int64(1)
+	switch {
+	case strings.HasSuffix(limit, "gb"), strings.HasSuffix(limit, "g"):
+		multiplier = 1024 * 1024 * 1024
+		limit = strings.TrimSuffix(strings.TrimSuffix(limit, "b"), "g")
+	case strings.HasSuffix(limit, "mb"), strings.HasSuffix(limit, "m"):
+		multiplier = 1024 * 1024
+		limit = strings.TrimSuffix(strings.TrimSuffix(limit, "b"), "m")
+	case strings.HasSuffix(limit, "kb"), strings.HasSuffix(limit, "k"):
+		multiplier = 1024
+		limit = strings.TrimSuffix(strings.TrimSuffix(limit, "b"), "k")
+	}
+	var value int64
+	fmt.Sscanf(limit, "%d", &value)
+	return value * multiplier
+}
+
+func diffStringSlices(before, after []string) []string {
+	beforeSet := make(map[string]bool)
+	for _, s := range before {
+		beforeSet[s] = true
+	}
+	var result []string
+	for _, s := range after {
+		if !beforeSet[s] {
+			result = append(result, s)
+		}
+	}
+	return result
+}
