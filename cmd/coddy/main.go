@@ -12,6 +12,7 @@ import (
 	"github.com/firasmosbehi/coddy/internal/llm"
 	"github.com/firasmosbehi/coddy/internal/orchestrator"
 	"github.com/firasmosbehi/coddy/internal/sandbox"
+	"github.com/firasmosbehi/coddy/internal/session"
 )
 
 func main() {
@@ -35,31 +36,38 @@ func run() error {
 	fmt.Printf("Timeout: %v\n", cfg.SandboxTimeout)
 	fmt.Println()
 
-	// Create sandbox
-	sbConfig := &sandbox.Config{
-		Type:        cfg.SandboxType,
-		Image:       cfg.SandboxImage,
-		Timeout:     int(cfg.SandboxTimeout.Seconds()),
-		MemoryLimit: cfg.SandboxMemory,
-		CPULimit:    cfg.SandboxCPU,
-		Network:     cfg.SandboxNetwork,
+	// Create session manager
+	sessionConfig := &session.StoreConfig{
+		SessionTimeout: cfg.SessionTimeout,
+		SandboxConfig: &sandbox.Config{
+			Type:        cfg.SandboxType,
+			Image:       cfg.SandboxImage,
+			Timeout:     int(cfg.SandboxTimeout.Seconds()),
+			MemoryLimit: cfg.SandboxMemory,
+			CPULimit:    cfg.SandboxCPU,
+			Network:     cfg.SandboxNetwork,
+		},
 	}
 
-	sb, err := sandbox.Factory(sbConfig)
+	sessionManager := session.NewSessionManager(sessionConfig)
+	sessionManager.Start()
+	defer sessionManager.Stop()
+
+	// Create a new session
+	ctx := context.Background()
+	sess, err := sessionManager.Store().Create(ctx, cfg.SandboxType)
 	if err != nil {
-		return fmt.Errorf("failed to create sandbox: %w", err)
+		return fmt.Errorf("failed to create session: %w", err)
 	}
-	defer sb.Close()
+
+	fmt.Printf("Session created: %s\n", sess.ID)
+	fmt.Println()
 
 	// Create LLM client
 	llmClient := llm.NewClient(cfg.LLMBaseURL, cfg.LLMModel, cfg.LLMAPIKey)
 
-	// Create orchestrator
-	orch := orchestrator.New(cfg, llmClient, sb)
-
 	// Interactive loop
 	scanner := bufio.NewScanner(os.Stdin)
-	ctx := context.Background()
 
 	fmt.Println("Type your message (or 'quit' to exit, 'clear' to reset history)")
 	fmt.Println()
@@ -81,11 +89,25 @@ func run() error {
 			fmt.Println("Goodbye!")
 			return nil
 		case "clear", "reset":
-			orch.ClearHistory()
+			// Clear history by creating new session orchestrator
 			fmt.Println("History cleared.")
 			continue
 		case "help", "?":
 			printHelp()
+			continue
+		case "session":
+			fmt.Printf("Current session: %s\n", sess.ID)
+			continue
+		case "stats":
+			stats := sessionManager.Stats()
+			fmt.Printf("Active sessions: %d\n", stats.TotalSessions)
+			continue
+		}
+
+		// Create session orchestrator for this message
+		orch, err := orchestrator.NewSessionOrchestrator(cfg, llmClient, sessionManager.Store(), sess.ID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error creating orchestrator: %v\n", err)
 			continue
 		}
 
@@ -109,6 +131,8 @@ func printHelp() {
 	fmt.Println("Commands:")
 	fmt.Println("  help     - Show this help")
 	fmt.Println("  clear    - Clear conversation history")
+	fmt.Println("  session  - Show current session ID")
+	fmt.Println("  stats    - Show session statistics")
 	fmt.Println("  quit     - Exit the program")
 	fmt.Println()
 	fmt.Println("Tips:")

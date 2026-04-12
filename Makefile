@@ -1,4 +1,4 @@
-# Coddy Makefile
+ # Coddy Makefile
 
 .PHONY: build build-cli build-server test lint fmt clean run docker
 
