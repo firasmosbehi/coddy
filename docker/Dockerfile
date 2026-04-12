@@ -18,16 +18,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     g++ \
     make \
     git \
-    # Required for matplotlib
     libfreetype6-dev \
     libpng-dev \
-    # Required for Pillow
     libjpeg-dev \
     libtiff-dev \
-    # Required for scipy/numpy
     libopenblas-dev \
     gfortran \
-    # Required for Node.js build tools
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
@@ -54,30 +50,23 @@ RUN pip install --user --no-cache-dir \
     beautifulsoup4 \
     Pillow \
     sympy \
-    openpyxl \
-    ipython
+    openpyxl
 
-# Install Node.js packages globally (in user directory)
+# Install Node.js packages
 RUN npm config set prefix $HOME/.local && \
     npm install -g \
     lodash \
     axios \
     cheerio \
     csv-parse \
-    mathjs \
-    sharp
+    mathjs
 
 # Ensure local bin is in PATH
 ENV PATH=$HOME/.local/bin:$PATH
 
-# Create working directory for code execution
+# Create working directory
 RUN mkdir -p $HOME/workspace
 WORKDIR $HOME/workspace
 
-# Metadata
-LABEL maintainer="Coddy Contributors"
-LABEL description="Coddy Sandbox - Isolated execution environment for LLM code execution"
-LABEL version="0.1.0"
-
-# Default command (container should be kept alive by orchestrator)
+# Default command
 CMD ["tail", "-f", "/dev/null"]

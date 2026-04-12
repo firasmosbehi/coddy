@@ -1,24 +1,22 @@
 # 🚀 Coddy
 
-[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
+[![Go Version](https://img.shields.io/badge/go-1.21+-00ADD8.svg?logo=go)](https://golang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![FastAPI](https://img.shields.io/badge/FastAPI-009688.svg?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
-[![Docker](https://img.shields.io/badge/Docker-2496ED.svg?logo=docker&logoColor=white)](https://www.docker.com/)
 
 > **Give every LLM the power to write, execute, and iterate on code safely.**
 
-Coddy is an open, model-agnostic orchestration layer that enables any LLM (Qwen, Llama, Mistral, GPT-4, etc.) to run Python and Node.js code in isolated sandboxes — just like Claude's coding environment, but self-hostable and extensible.
+Coddy is an open, model-agnostic orchestration layer that enables any LLM (Qwen, Llama, Mistral, GPT-4, etc.) to run Python and Node.js code in isolated sandboxes — just like Claude's coding environment, but self-hostable and written in Go.
 
 ---
 
 ## ✨ Features
 
-- 🧠 **Model Agnostic** — Works with any OpenAI-compatible LLM (local or cloud)
+- 🧠 **Model Agnostic** — Works with any OpenAI-compatible LLM
 - 🔒 **Secure Sandboxing** — Docker-based isolation with resource limits
 - 📝 **Stateful Sessions** — Variables and files persist across interactions
 - 🌐 **Dual Interface** — CLI for quick tasks, HTTP API for integrations
-- ⚡ **Streaming Support** — Real-time response streaming via WebSocket
-- 📁 **File Operations** — Upload, process, and download files
+- ⚡ **Concurrent** — Built with Go goroutines for high performance
+- 📦 **Single Binary** — Easy deployment with static binary
 - 🐍 **Python & Node.js** — Built-in support with pre-installed packages
 
 ---
@@ -27,26 +25,26 @@ Coddy is an open, model-agnostic orchestration layer that enables any LLM (Qwen,
 
 ### Prerequisites
 
-- Python 3.12+
-- Docker
+- Go 1.21+
+- Python 3.12+ and/or Node.js 20 (for subprocess sandbox)
+- Docker (for Docker sandbox)
 - An OpenAI-compatible LLM (Ollama recommended for local use)
 
 ### Installation
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/coddy.git
+git clone https://github.com/firasmosbehi/coddy.git
 cd coddy
 
-# Create virtual environment
-python -m venv .venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+# Download dependencies
+make deps
 
-# Install dependencies
-pip install -r requirements.txt
+# Build binaries
+make build
 
-# Build the sandbox Docker image
-docker build -t coddy-sandbox -f docker/Dockerfile .
+# Run CLI
+./build/coddy
 ```
 
 ### Configuration
@@ -57,12 +55,10 @@ Create a `.env` file:
 # LLM Configuration
 LLM_BASE_URL=http://localhost:11434/v1
 LLM_MODEL=qwen3-coder
-LLM_API_KEY=  # Leave empty for Ollama
 
 # Sandbox Configuration
-SANDBOX_TYPE=docker
+SANDBOX_TYPE=subprocess  # Use 'docker' for production
 SANDBOX_TIMEOUT=30
-SANDBOX_MEMORY_LIMIT=512m
 ```
 
 ### Usage
@@ -70,8 +66,8 @@ SANDBOX_MEMORY_LIMIT=512m
 #### CLI Mode
 
 ```bash
-# Start interactive chat
-python -m coddy
+# Run the CLI
+./build/coddy
 
 # Example session
 > What is the 50th Fibonacci number?
@@ -86,16 +82,10 @@ The 50th Fibonacci number is 12,586,269,025.
 
 ```bash
 # Start the API server
-python -m coddy.api
+./build/coddy-server
 
-# Create a session
-curl -X POST http://localhost:8000/sessions
-# {"session_id": "abc-123", ...}
-
-# Chat with the session
-curl -X POST http://localhost:8000/sessions/abc-123/chat \
-  -H "Content-Type: application/json" \
-  -d '{"message": "Create a plot of sin(x)"}'
+# Health check
+curl http://localhost:8000/health
 ```
 
 ---
@@ -125,17 +115,19 @@ User Request
 
 ```
 coddy/
-├── src/coddy/           # Core library
-│   ├── api/             # FastAPI application
-│   ├── orchestrator/    # Main execution loop
-│   ├── llm/             # LLM client
-│   ├── sandbox/         # Sandbox implementations
-│   ├── tools/           # Tool definitions
-│   └── prompts/         # System prompts
-├── docker/              # Sandbox Dockerfile
-├── tests/               # Test suite
-├── examples/            # Usage examples
-└── docs/                # Documentation
+├── cmd/                    # Entry points
+│   ├── coddy/             # CLI application
+│   └── server/            # API server
+├── internal/               # Private packages
+│   ├── config/            # Configuration
+│   ├── llm/               # LLM client
+│   ├── sandbox/           # Sandbox implementations
+│   ├── orchestrator/      # Core execution loop
+│   ├── tools/             # Tool definitions
+│   └── api/               # HTTP handlers
+├── pkg/models/             # Shared types
+├── docker/                 # Sandbox Dockerfile
+└── Makefile               # Build automation
 ```
 
 ---
@@ -144,17 +136,19 @@ coddy/
 
 ```bash
 # Run tests
-pytest tests/
+make test
 
-# Run with coverage
-pytest tests/ --cov=src/coddy
+# Run tests with coverage
+make test-coverage
 
-# Linting
-ruff check src/
-ruff format src/
+# Format code
+make fmt
 
-# Type checking
-mypy src/
+# Lint code
+make lint
+
+# Build Docker sandbox
+make docker
 ```
 
 ---
@@ -174,7 +168,7 @@ This project is licensed under the MIT License — see [LICENSE](LICENSE) for de
 ## 🙏 Acknowledgments
 
 - Inspired by Claude's code execution environment
-- Built with [FastAPI](https://fastapi.tiangolo.com/), [Docker](https://www.docker.com/), and ❤️
+- Built with Go ❤️
 
 ---
 
