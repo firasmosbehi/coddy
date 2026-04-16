@@ -12,12 +12,14 @@ Coddy is an open, model-agnostic orchestration layer that enables any LLM (Qwen,
 ## ✨ Features
 
 - 🧠 **Model Agnostic** — Works with any OpenAI-compatible LLM
-- 🔒 **Sandboxed Execution** — Subprocess sandbox (dev), Docker coming soon
+- 🔒 **Sandboxed Execution** — Subprocess sandbox (dev), Docker support planned
 - 📝 **Stateful Sessions** — Variables and files persist across interactions
-- 🌐 **Dual Interface** — CLI for quick tasks, HTTP API for integrations
+- 🌐 **Full REST API** — Complete HTTP API with file operations
+- 🔌 **WebSocket Support** — Real-time streaming chat
 - ⚡ **Concurrent** — Built with Go goroutines for high performance
 - 📦 **Single Binary** — Easy deployment with static binary
 - 🐍 **Python & Node.js** — Built-in support for both languages
+- 🔐 **Middleware** — Logging, CORS, rate limiting, recovery
 
 ---
 
@@ -42,6 +44,9 @@ make build
 
 # Run CLI
 ./build/coddy
+
+# Or run API server
+./build/coddy-server
 ```
 
 ### Configuration
@@ -54,43 +59,93 @@ LLM_BASE_URL=http://localhost:11434/v1
 LLM_MODEL=qwen3-coder
 
 # Sandbox Configuration
-SANDBOX_TYPE=subprocess  # Use 'docker' when implemented
+SANDBOX_TYPE=subprocess
 SANDBOX_TIMEOUT=30
 ```
 
-### Usage
+---
 
-#### CLI Mode
+## 📚 API Reference
+
+### Health & Status
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/health` | Health check |
+| GET | `/stats` | Server statistics |
+
+### Sessions
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/sessions` | Create new session |
+| GET | `/sessions` | List all sessions |
+| GET | `/sessions/:id` | Get session details |
+| DELETE | `/sessions/:id` | Delete session |
+
+### Messages
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/sessions/:id/messages` | Get chat history |
+| DELETE | `/sessions/:id/messages` | Clear chat history |
+
+### File Operations
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/sessions/:id/upload` | Upload file |
+| GET | `/sessions/:id/files` | List files |
+| GET | `/sessions/:id/files/:path` | Download file |
+
+### WebSocket
+
+| Protocol | Endpoint | Description |
+|----------|----------|-------------|
+| WS | `/ws/sessions/:id` | Real-time streaming chat |
+
+### Example Usage
 
 ```bash
-# Run the CLI
-./build/coddy
+# Create a session
+SESSION_ID=$(curl -s -X POST http://localhost:8000/sessions | jq -r '.id')
 
-# Example session
-🚀 Coddy - LLM Code Execution Environment
-=========================================
-Model: qwen3-coder
-Sandbox: subprocess
-Timeout: 30s
+# Upload a file
+curl -X POST -F "file=@data.csv" http://localhost:8000/sessions/$SESSION_ID/upload
 
-Type your message (or 'quit' to exit, 'clear' to reset history)
+# List files
+curl http://localhost:8000/sessions/$SESSION_ID/files
 
-> What is the 50th Fibonacci number?
-[Tool Call: execute_code]
-STDOUT: 12586269025
-Exit code: 0
+# Download a file
+curl http://localhost:8000/sessions/$SESSION_ID/files/data.csv -o data.csv
 
-The 50th Fibonacci number is 12,586,269,025.
+# Get messages
+curl http://localhost:8000/sessions/$SESSION_ID/messages
+
+# Delete session
+curl -X DELETE http://localhost:8000/sessions/$SESSION_ID
 ```
 
-#### API Mode
+### WebSocket Example (JavaScript)
 
-```bash
-# Start the API server
-./build/coddy-server
+```javascript
+const ws = new WebSocket('ws://localhost:8000/ws/sessions/:id');
 
-# Health check
-curl http://localhost:8000/health
+ws.onopen = () => {
+  ws.send(JSON.stringify({
+    type: "chat",
+    payload: JSON.stringify({message: "Calculate 2+2"})
+  }));
+};
+
+ws.onmessage = (event) => {
+  const msg = JSON.parse(event.data);
+  if (msg.type === "chunk") {
+    console.log(msg.content);
+  } else if (msg.type === "done") {
+    console.log("Complete!");
+  }
+};
 ```
 
 ---
@@ -98,20 +153,19 @@ curl http://localhost:8000/health
 ## 🏗️ Architecture
 
 ```
-User Request
-     │
-     ▼
-┌─────────────────┐
-│   Orchestrator   │
-│    (Coddy)       │
-└────────┬────────┘
-         │
-    ┌────┴────┐
-    ▼         ▼
-┌───────┐  ┌─────────┐
-│  LLM  │  │ Sandbox │
-│       │  │(subprocess)
-└───────┘  └─────────┘
+┌─────────────────────────────────────────┐
+│           API Server (HTTP/WebSocket)    │
+├─────────────────────────────────────────┤
+│  Middleware: Logging | CORS | Recovery   │
+├─────────────────────────────────────────┤
+│  Handlers: Sessions | Files | Messages   │
+├─────────────────────────────────────────┤
+│         Session Manager                  │
+├─────────────────────────────────────────┤
+│  Orchestrator  ←→  LLM Client            │
+├─────────────────────────────────────────┤
+│         Sandbox (Subprocess/Docker)      │
+└─────────────────────────────────────────┘
 ```
 
 ---
@@ -120,21 +174,19 @@ User Request
 
 ```
 coddy/
-├── cmd/                    # Entry points
+├── cmd/
 │   ├── coddy/             # CLI application
 │   └── server/            # API server
-├── internal/               # Private packages
-│   ├── config/            # Environment-based config
+├── internal/
+│   ├── api/               # HTTP handlers, middleware, WebSocket
+│   ├── config/            # Configuration
 │   ├── llm/               # LLM client
 │   ├── sandbox/           # Sandbox implementations
-│   │   ├── subprocess.go  # Working implementation
-│   │   ├── docker.go      # Stub (see docker_impl.go.reference)
-│   │   └── docker_impl.go.reference  # Full Docker implementation
 │   ├── orchestrator/      # Core execution loop
-│   ├── tools/             # Tool definitions
-│   └── api/               # HTTP handlers
-├── pkg/models/             # Public/shared types
-├── docker/                 # Sandbox Dockerfile
+│   ├── session/           # Session management
+│   └── tools/             # Tool definitions
+├── pkg/models/            # Public/shared types
+├── docker/                # Sandbox Dockerfile
 ├── Makefile               # Build automation
 └── go.mod                 # Go module
 ```
@@ -153,11 +205,11 @@ make test-coverage
 # Format code
 make fmt
 
-# Lint code
-make lint
-
-# Build for release
+# Build binaries
 make build
+
+# Run API server
+make run-server
 ```
 
 ---
@@ -166,20 +218,12 @@ make build
 
 | Phase | Status | Description |
 |-------|--------|-------------|
-| Phase 0 | ✅ | Project structure, data models, configuration |
-| Phase 1 | ✅ | Core engine: subprocess sandbox, LLM client, CLI |
-| Phase 2 | 🚧 | Docker sandbox (stub implemented, full version pending) |
-| Phase 3 | ⏳ | Stateful sessions with session manager |
-| Phase 4 | ⏳ | Full HTTP API with WebSocket support |
-| Phase 5 | ⏳ | Enhanced tools and hardening |
-
-### Docker Sandbox
-
-The Docker sandbox implementation is stubbed due to complex dependency requirements. A complete reference implementation is available in `internal/sandbox/docker_impl.go.reference`. To enable:
-
-1. Set up Docker SDK dependencies
-2. Rename `docker_impl.go.reference` to `docker_impl.go`
-3. Update imports and build
+| Phase 0 | ✅ | Foundation, structure, config |
+| Phase 1 | ✅ | Core engine, CLI, subprocess sandbox |
+| Phase 2 | 🚧 | Docker sandbox (reference ready) |
+| Phase 3 | ✅ | Stateful sessions |
+| Phase 4 | ✅ | **Full Web API with WebSocket** |
+| Phase 5 | ⏳ | Hardening, monitoring, production |
 
 ---
 

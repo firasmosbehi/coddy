@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -56,10 +57,16 @@ func run() error {
 	// Create handlers
 	handlers := api.NewHandlers(cfg, llmClient, sessionManager)
 
-	// Setup routes
+	// Setup routes with middleware
 	mux := http.NewServeMux()
 
-	// Health check
+	// Apply middleware chain
+	var handler http.Handler = mux
+	handler = api.LoggingMiddleware(handler)
+	handler = api.RecoveryMiddleware(handler)
+	handler = api.CORSMiddleware(handler)
+
+	// Health check (no auth required)
 	mux.HandleFunc("/health", handlers.Health)
 
 	// Stats
@@ -78,6 +85,52 @@ func run() error {
 	})
 
 	mux.HandleFunc("/sessions/", func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+
+		// Handle file operations
+		if strings.Contains(path, "/files/") {
+			switch r.Method {
+			case http.MethodGet:
+				handlers.DownloadFile(w, r)
+			default:
+				w.WriteHeader(http.StatusMethodNotAllowed)
+			}
+			return
+		}
+
+		if strings.HasSuffix(path, "/files") {
+			switch r.Method {
+			case http.MethodGet:
+				handlers.ListFiles(w, r)
+			default:
+				w.WriteHeader(http.StatusMethodNotAllowed)
+			}
+			return
+		}
+
+		if strings.HasSuffix(path, "/messages") {
+			switch r.Method {
+			case http.MethodGet:
+				handlers.GetMessages(w, r)
+			case http.MethodDelete:
+				handlers.ClearMessages(w, r)
+			default:
+				w.WriteHeader(http.StatusMethodNotAllowed)
+			}
+			return
+		}
+
+		if strings.HasSuffix(path, "/upload") {
+			switch r.Method {
+			case http.MethodPost:
+				handlers.UploadFile(w, r)
+			default:
+				w.WriteHeader(http.StatusMethodNotAllowed)
+			}
+			return
+		}
+
+		// Regular session operations
 		switch r.Method {
 		case http.MethodGet:
 			handlers.GetSession(w, r)
@@ -88,25 +141,34 @@ func run() error {
 		}
 	})
 
+	// WebSocket endpoint
+	mux.HandleFunc("/ws/sessions/", handlers.HandleWebSocket)
+
 	// Create server
 	server := &http.Server{
 		Addr:         cfg.Address(),
-		Handler:      mux,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
-		IdleTimeout:  60 * time.Second,
+		Handler:      handler,
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  120 * time.Second,
 	}
 
 	// Start server in goroutine
 	go func() {
 		log.Printf("Server listening on http://%s", cfg.Address())
-		log.Printf("Health check: http://%s/health", cfg.Address())
-		log.Printf("API endpoints:")
-		log.Printf("  POST   /sessions     - Create a new session")
-		log.Printf("  GET    /sessions     - List all sessions")
-		log.Printf("  GET    /sessions/:id - Get session details")
-		log.Printf("  DELETE /sessions/:id - Delete a session")
-		log.Printf("  GET    /stats        - Get server statistics")
+		log.Printf("")
+		log.Printf("📚 API Documentation:")
+		log.Printf("  Health:    GET  /health")
+		log.Printf("  Stats:     GET  /stats")
+		log.Printf("  Sessions:  POST /sessions              - Create session")
+		log.Printf("             GET  /sessions              - List sessions")
+		log.Printf("             GET  /sessions/:id          - Get session")
+		log.Printf("             DEL  /sessions/:id          - Delete session")
+		log.Printf("  Files:     POST /sessions/:id/upload   - Upload file")
+		log.Printf("             GET  /sessions/:id/files    - List files")
+		log.Printf("             GET  /sessions/:id/files/*  - Download file")
+		log.Printf("  WebSocket: /ws/sessions/:id            - Real-time chat")
+		log.Printf("")
 
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("Server error: %v", err)
